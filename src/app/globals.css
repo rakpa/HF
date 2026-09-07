@@ -43,6 +43,10 @@ body {
   box-sizing: border-box;
 }
 
+pre {
+  overflow-wrap: anywhere;
+}
+
 ::selection {
   background: #cce4ff;
 }
