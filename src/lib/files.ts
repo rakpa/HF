@@ -47,8 +47,8 @@ export const SKIP_DIR = new Set([
 ]);
 
 export const MAX_FILE_BYTES = 200_000;
-export const MAX_FILES = 80;
-export const MAX_CONTEXT_CHARS = 80_000;
+export const MAX_FILES = 200;
+export const MAX_CONTEXT_CHARS = 120_000;
 
 export function extOf(path: string): string {
   const base = path.split("/").pop() ?? path;
@@ -76,15 +76,20 @@ export function parseGithubRepo(input: string): { owner: string; repo: string } 
 }
 
 export function buildFileContext(files: WorkspaceFile[]): string {
-  let used = 0;
-  const chunks: string[] = [];
+  if (!files.length) return "";
+  const index = `The workspace contains ${files.length} file(s). You can read and edit any of them:\n${files.map((file) => `- ${file.path}`).join("\n")}`;
+  let used = index.length;
+  const chunks: string[] = [index];
   for (const file of files) {
-    const block = `File: ${file.path}\n\`\`\`\n${file.content}\n\`\`\``;
-    if (used + block.length > MAX_CONTEXT_CHARS) break;
+    const block = `\n\nFile: ${file.path}\n\`\`\`\n${file.content}\n\`\`\``;
+    if (used + block.length > MAX_CONTEXT_CHARS) {
+      chunks.push(`\n\n[${file.path} is in the workspace but omitted from this prompt for size. Ask to open it if you need the full contents.]`);
+      continue;
+    }
     chunks.push(block);
     used += block.length;
   }
-  return chunks.join("\n\n");
+  return chunks.join("");
 }
 
 export type ProposedFile = { path: string; content: string; action: "create" | "edit" | "delete" };

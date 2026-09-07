@@ -37,9 +37,7 @@ Import this GitHub repo in Vercel, set `HF_TOKEN`, deploy. Git commits must use 
 
 ## What it does
 
-- Cursor-style 3-panel workspace: file explorer, Monaco editor, AI agent
-- Connect GitHub (OAuth or a repo-scoped token), pick a repo, browse the tree
-- Agent can propose file create/edit/delete with a live diff before apply
-- Git: branch, commit & push, pull, create pull requests
-- Terminal panel for agent run commands (hosted Vercel cannot execute your repo tests/builds; git goes through the GitHub API)
-- Streaming replies and a Working status while the agent runs
+- ChatGPT-style **centered** chat, with GitHub and files in the left sidebar
+- Connect GitHub with a repo-scoped token (or OAuth if `GITHUB_CLIENT_ID` / `SECRET` are set)
+- Upload files or a folder — they are attached to the agent so it can read and edit them
+- Live diffs before applying agent edits; commit, push, and open PRs

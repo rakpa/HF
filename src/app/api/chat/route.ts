@@ -4,8 +4,10 @@ import { DEFAULT_MODEL, isAllowedModel } from "@/lib/models";
 
 export const maxDuration = 60;
 
-const SYSTEM = `You are Forge, a Cursor-like coding agent with a file tree, editor, terminal, and GitHub git.
-You can read workspace files listed below. Propose precise changes using these tags:
+const SYSTEM = `You are Forge, a coding agent. The user may upload files or open a GitHub repo; those files ARE the workspace.
+Always use the attached workspace files when asked to read, edit, create, or delete code. Do not say you cannot access files if a workspace list is present.
+
+Propose precise changes using these tags:
 
 Create or replace a file:
 <file path="relative/path.ext" action="edit">
@@ -48,15 +50,19 @@ export async function POST(req: Request) {
 
   const model = body.model && isAllowedModel(body.model) ? body.model : DEFAULT_MODEL;
   const history = Array.isArray(body.messages) ? body.messages.slice(-24) : [];
-  const files = Array.isArray(body.files) ? body.files.slice(0, 40) : [];
+  const files = Array.isArray(body.files) ? body.files.slice(0, 200) : [];
   const fileContext = buildFileContext(files);
 
   const messages = [
     {
       role: "system" as const,
-      content: fileContext
-        ? `${SYSTEM}\n\nWorkspace files:\n\n${fileContext}`
-        : SYSTEM,
+      content: [
+        SYSTEM,
+        `The user selected model: ${model}. Use this request as that model.`,
+        fileContext
+          ? `Workspace files:\n\n${fileContext}`
+          : "No workspace files are attached yet. If the user asks to edit a project, tell them to upload files or open a GitHub repo in the left sidebar.",
+      ].join("\n\n"),
     },
     ...history.map((message) => ({
       role: message.role,
