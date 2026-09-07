@@ -1,23 +1,41 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState, type RefObject } from "react";
+import dynamic from "next/dynamic";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   MAX_FILE_BYTES,
   MAX_FILES,
+  type ProposedFile,
   type WorkspaceFile,
   isSkippedPath,
+  parseAgentRuns,
   parseProposedFiles,
 } from "@/lib/files";
 import { DEFAULT_MODEL, MODELS, type ModelId } from "@/lib/models";
 
-type ChatRole = "user" | "assistant";
-type ChatMessage = { id: string; role: ChatRole; content: string; applied?: string[] };
+const CodeEditor = dynamic(() => import("./CodeEditor").then((m) => m.CodeEditor), { ssr: false });
+const CodeDiff = dynamic(() => import("./CodeEditor").then((m) => m.CodeDiff), { ssr: false });
+
+type ChatMessage = { id: string; role: "user" | "assistant"; content: string };
 type GithubRepo = { owner: string; repo: string; branch: string };
-type GhUser = { login: string; avatar?: string };
-type GhRepo = { fullName: string; private: boolean; branch: string };
+type GhUser = { login: string };
+type GhRepo = { fullName: string };
+type PendingDiff = ProposedFile & { original: string };
+type TermLine = { id: string; cmd: string; output: string; running: boolean };
 
 function uid(): string {
   return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function visibleAgentText(content: string, streaming: boolean): string {
+  let text = content.replace(
+    /<file[\s\S]*?<\/file>|<run\b[\s\S]*?\/>|<run\b[\s\S]*?<\/run>|<command>[\s\S]*?<\/command>/g,
+    "",
+  );
+  if (streaming) {
+    text = text.replace(/<file\b[\s\S]*$|<run\b[\s\S]*$|<command>[\s\S]*$/g, "");
+  }
+  return text.trim();
 }
 
 function joinPath(parent: string, name: string): string {
@@ -53,29 +71,39 @@ function treeFromFiles(paths: string[]): Record<string, string[]> {
 export function Workspace() {
   const [files, setFiles] = useState<WorkspaceFile[]>([]);
   const [originals, setOriginals] = useState<Record<string, string>>({});
+  const [deleted, setDeleted] = useState<string[]>([]);
+  const [tabs, setTabs] = useState<string[]>([]);
   const [activePath, setActivePath] = useState<string | null>(null);
-  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  const [showDiff, setShowDiff] = useState(false);
+  const [pending, setPending] = useState<PendingDiff[]>([]);
+  const [reviewIndex, setReviewIndex] = useState(0);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [draft, setDraft] = useState("");
   const [commitMessage, setCommitMessage] = useState("");
+  const [prTitle, setPrTitle] = useState("");
+  const [branchName, setBranchName] = useState("");
+  const [branches, setBranches] = useState<string[]>([]);
   const [model, setModel] = useState<ModelId>(DEFAULT_MODEL);
   const [busy, setBusy] = useState(false);
-  const [committing, setCommitting] = useState(false);
+  const [status, setStatus] = useState("Ready");
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [repoInput, setRepoInput] = useState("");
   const [repo, setRepo] = useState<GithubRepo | null>(null);
   const [repoFiles, setRepoFiles] = useState<string[]>([]);
-  const [loadingPath, setLoadingPath] = useState<string | null>(null);
-  const [sidebar, setSidebar] = useState(true);
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [ghUser, setGhUser] = useState<GhUser | null>(null);
   const [ghRepos, setGhRepos] = useState<GhRepo[]>([]);
-  const [pat, setPat] = useState("");
   const [oauth, setOauth] = useState(false);
+  const [pat, setPat] = useState("");
+  const [terminalOpen, setTerminalOpen] = useState(true);
+  const [term, setTerm] = useState<TermLine[]>([]);
+  const [newPath, setNewPath] = useState("");
+  const [gitOpen, setGitOpen] = useState(false);
   const uploadRef = useRef<HTMLInputElement>(null);
   const folderRef = useRef<HTMLInputElement>(null);
+  const abortRef = useRef<AbortController | null>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
-  const composerRef = useRef<HTMLTextAreaElement>(null);
 
   const dirty = files.filter((file) => originals[file.path] !== file.content);
   const dirs = useMemo(
@@ -83,16 +111,14 @@ export function Workspace() {
     [files, repoFiles],
   );
   const active = files.find((file) => file.path === activePath) ?? null;
+  const review = pending[reviewIndex] ?? null;
 
   useEffect(() => {
     folderRef.current?.setAttribute("webkitdirectory", "");
-    folderRef.current?.setAttribute("directory", "");
   }, []);
-
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ block: "end" });
   }, [messages, busy]);
-
   useEffect(() => {
     void refreshGithub();
   }, []);
@@ -112,18 +138,26 @@ export function Workspace() {
     }
   }
 
+  async function loadBranches(target: GithubRepo) {
+    const res = await fetch(`/api/github/branches?owner=${target.owner}&repo=${target.repo}`);
+    const data = await res.json();
+    if (res.ok) setBranches(data.branches ?? []);
+  }
+
   function upsertFile(next: WorkspaceFile, open = true) {
     setFiles((prev) => {
       const rest = prev.filter((file) => file.path !== next.path);
       return [...rest, next].sort((a, b) => a.path.localeCompare(b.path));
     });
     setOriginals((prev) => (next.path in prev ? prev : { ...prev, [next.path]: next.content }));
-    if (open) setActivePath(next.path);
+    if (open) {
+      setActivePath(next.path);
+      setTabs((prev) => (prev.includes(next.path) ? prev : [...prev, next.path]));
+    }
   }
 
   async function onUpload(list: FileList | null) {
     if (!list?.length) return;
-    setError(null);
     for (const file of Array.from(list).slice(0, MAX_FILES)) {
       const path = (file.webkitRelativePath || file.name).replace(/^\.\//, "");
       if (isSkippedPath(path) || file.size > MAX_FILE_BYTES) continue;
@@ -131,88 +165,73 @@ export function Workspace() {
     }
   }
 
-  async function openRepo(input: string) {
+  async function openRepo(input: string, branch?: string) {
     setError(null);
     setBusy(true);
+    setStatus("Cloning repository…");
     try {
       const res = await fetch("/api/github/tree", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ repo: input }),
+        body: JSON.stringify({ repo: input, branch }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Could not open repo.");
-      const nextRepo = { owner: data.owner, repo: data.repo, branch: data.branch };
+      const nextRepo = {
+        owner: data.owner as string,
+        repo: data.repo as string,
+        branch: branch || (data.branch as string),
+      };
       setRepo(nextRepo);
       setRepoFiles(data.files as string[]);
       setFiles([]);
       setOriginals({});
+      setDeleted([]);
+      setTabs([]);
       setActivePath(null);
-      setMessages([]);
-      await hydrateRepo(nextRepo, data.files as string[]);
+      setPending([]);
+      await loadBranches(nextRepo);
+      const preferred = (data.files as string[])
+        .filter((path) => /\.(ts|tsx|js|jsx|py|md|json)$/i.test(path))
+        .slice(0, 12);
+      setStatus("Reading files…");
+      for (const path of preferred) {
+        await loadRepoFile(nextRepo, path, preferred[0] === path);
+      }
+      setStatus("Ready");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not open repo.");
+      setStatus("Ready");
     } finally {
       setBusy(false);
     }
   }
 
-  async function hydrateRepo(target: GithubRepo, paths: string[]) {
-    const preferred = paths
-      .filter((path) => /\.(ts|tsx|js|jsx|py|go|rs|md|json|css|html)$/i.test(path))
-      .slice(0, 20);
-    for (const path of preferred) {
-      await loadRepoFile(target, path, false);
-    }
-  }
-
   async function loadRepoFile(target: GithubRepo, path: string, open = true) {
-    const existing = files.find((file) => file.path === path);
-    if (existing) {
-      if (open) setActivePath(path);
-      return existing;
-    }
-    setLoadingPath(path);
-    try {
-      const res = await fetch("/api/github/file", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...target, path }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Could not load file.");
-      const next = { path, content: data.content as string, source: "github" as const };
-      upsertFile(next, open);
-      return next;
-    } finally {
-      setLoadingPath(null);
-    }
+    setStatus(`Opening ${path}`);
+    const res = await fetch("/api/github/file", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...target, path }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Could not load file.");
+    upsertFile({ path, content: data.content, source: "github" }, open);
+    setOriginals((prev) => ({ ...prev, [path]: data.content }));
+    setStatus("Ready");
   }
 
   async function send() {
     const text = draft.trim();
     if (!text || busy) return;
-    const userMessage: ChatMessage = { id: uid(), role: "user", content: text };
-    const nextMessages = [...messages, userMessage];
+    const nextMessages = [...messages, { id: uid(), role: "user" as const, content: text }];
     setMessages(nextMessages);
     setDraft("");
     setBusy(true);
+    setStatus("Agent is working…");
     setError(null);
-
-    let contextFiles = [...files];
-    if (repo) {
-      const mentioned = repoFiles.filter((path) => text.includes(path) || text.includes(path.split("/").pop() ?? ""));
-      for (const path of mentioned.slice(0, 8)) {
-        if (!contextFiles.some((file) => file.path === path)) {
-          try {
-            const loaded = await loadRepoFile(repo, path, false);
-            if (loaded) contextFiles = [...contextFiles.filter((f) => f.path !== loaded.path), loaded];
-          } catch {
-            // continue with files already in memory
-          }
-        }
-      }
-    }
+    const controller = new AbortController();
+    abortRef.current = controller;
 
     const assistantId = uid();
     setMessages((prev) => [...prev, { id: assistantId, role: "assistant", content: "" }]);
@@ -220,24 +239,23 @@ export function Workspace() {
     try {
       const res = await fetch("/api/chat", {
         method: "POST",
+        signal: controller.signal,
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           model,
           messages: nextMessages.map(({ role, content }) => ({ role, content })),
-          files: contextFiles,
+          files,
         }),
       });
       if (!res.ok) {
         const data = await res.json().catch(() => ({ error: "Chat failed." }));
         throw new Error(data.error || "Chat failed.");
       }
-      if (!res.body) throw new Error("No response stream.");
-
+      if (!res.body) throw new Error("No stream.");
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
       let assembled = "";
-
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
@@ -263,73 +281,213 @@ export function Workspace() {
               ),
             );
           } catch {
-            // ignore malformed SSE
+            // ignore
           }
         }
       }
 
       const proposed = parseProposedFiles(assembled);
-      for (const item of proposed) {
+      const runs = parseAgentRuns(assembled);
+      if (proposed.length) {
+        setStatus("Preparing diffs…");
+        const diffs: PendingDiff[] = proposed.map((item) => ({
+          ...item,
+          original: item.action === "create" ? "" : (files.find((f) => f.path === item.path)?.content ?? originals[item.path] ?? ""),
+        }));
+        setPending(diffs);
+        setReviewIndex(0);
+        setShowDiff(true);
+        setActivePath(diffs[0].path);
+        setCommitMessage(text.slice(0, 72));
+      }
+      for (const run of runs) {
+        queueCommand(run.cmd);
+        setTerminalOpen(true);
+      }
+      setStatus(proposed.length ? "Review diffs" : "Ready");
+    } catch (err) {
+      if ((err as Error).name === "AbortError") {
+        setStatus("Stopped");
+      } else {
+        const message = err instanceof Error ? err.message : "Chat failed.";
+        setError(message);
+        setStatus("Ready");
+      }
+    } finally {
+      setBusy(false);
+      abortRef.current = null;
+    }
+  }
+
+  function queueCommand(cmd: string) {
+    const id = uid();
+    setTerm((prev) => [
+      ...prev,
+      {
+        id,
+        cmd,
+        running: false,
+        output:
+          "This hosted agent cannot execute your repo shell (tests/builds) on Vercel.\nGit commit, branch, push, pull, and pull requests run through the GitHub API.",
+      },
+    ]);
+  }
+
+  function applyReview(item: PendingDiff) {
+    if (item.action === "delete") {
+      setFiles((prev) => prev.filter((file) => file.path !== item.path));
+      setTabs((prev) => prev.filter((path) => path !== item.path));
+      setDeleted((prev) => (prev.includes(item.path) ? prev : [...prev, item.path]));
+      if (activePath === item.path) setActivePath(null);
+    } else {
+      upsertFile(
+        {
+          path: item.path,
+          content: item.content,
+          source: files.find((file) => file.path === item.path)?.source ?? (repo ? "github" : "upload"),
+        },
+        true,
+      );
+      if (item.action === "create") {
+        setOriginals((prev) => ({ ...prev, [item.path]: "" }));
+      }
+      setDeleted((prev) => prev.filter((path) => path !== item.path));
+    }
+    setPending((prev) => {
+      const next = prev.filter((diff) => diff.path !== item.path);
+      setReviewIndex(0);
+      if (next.length === 0) {
+        setShowDiff(false);
+        setStatus("Ready");
+      }
+      return next;
+    });
+  }
+
+  function applyAllReviews() {
+    const items = [...pending];
+    for (const item of items) {
+      if (item.action === "delete") {
+        setFiles((prev) => prev.filter((file) => file.path !== item.path));
+        setTabs((prev) => prev.filter((path) => path !== item.path));
+        setDeleted((prev) => (prev.includes(item.path) ? prev : [...prev, item.path]));
+      } else {
         upsertFile(
           {
             path: item.path,
             content: item.content,
-            source: contextFiles.find((file) => file.path === item.path)?.source ?? (repo ? "github" : "upload"),
+            source: files.find((file) => file.path === item.path)?.source ?? (repo ? "github" : "upload"),
           },
-          false,
+          true,
         );
+        if (item.action === "create") {
+          setOriginals((prev) => ({ ...prev, [item.path]: "" }));
+        }
       }
-      if (proposed.length) {
-        setMessages((prev) =>
-          prev.map((message) =>
-            message.id === assistantId
-              ? { ...message, applied: proposed.map((item) => item.path) }
-              : message,
-          ),
-        );
-        setCommitMessage(text.slice(0, 72));
-      }
-    } catch (err) {
-      const message = err instanceof Error ? err.message : "Chat failed.";
-      setError(message);
-      setMessages((prev) =>
-        prev.map((item) =>
-          item.id === assistantId && !item.content ? { ...item, content: `Error: ${message}` } : item,
-        ),
-      );
-    } finally {
-      setBusy(false);
     }
+    setPending([]);
+    setShowDiff(false);
+    setStatus("Ready");
+  }
+
+  function rejectReview(item: PendingDiff) {
+    setPending((prev) => {
+      const next = prev.filter((diff) => diff.path !== item.path);
+      setReviewIndex(0);
+      if (next.length === 0) setShowDiff(false);
+      return next;
+    });
+  }
+
+  function createLocalFile(event: React.FormEvent) {
+    event.preventDefault();
+    const path = newPath.trim().replace(/^\.\//, "");
+    if (!path || path.includes("..")) return;
+    upsertFile({ path, content: "", source: repo ? "github" : "upload" });
+    setOriginals((prev) => ({ ...prev, [path]: "" }));
+    setNewPath("");
+    setShowDiff(false);
   }
 
   async function commitToGithub() {
-    if (!repo || dirty.length === 0) return;
-    setCommitting(true);
-    setError(null);
-    try {
-      const res = await fetch("/api/github/commit", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          ...repo,
-          message: commitMessage || "Update from Forge",
-          files: dirty.map((file) => ({ path: file.path, content: file.content })),
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Commit failed.");
-      setOriginals((prev) => {
-        const next = { ...prev };
-        for (const file of dirty) next[file.path] = file.content;
-        return next;
-      });
-      setNotice(`Committed ${data.sha?.slice(0, 7)} to ${repo.owner}/${repo.repo}`);
-      setCommitMessage("");
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Commit failed.");
-    } finally {
-      setCommitting(false);
+    if (!repo) return;
+    const payload = [
+      ...dirty.map((file) => ({ path: file.path, content: file.content })),
+      ...deleted.map((path) => ({ path, delete: true as const })),
+    ];
+    if (!payload.length) return;
+    setStatus("Committing and pushing…");
+    const res = await fetch("/api/github/commit", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...repo, message: commitMessage || "Update from Forge", files: payload }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      setError(data.error || "Commit failed.");
+      setStatus("Ready");
+      return;
     }
+    setOriginals((prev) => {
+      const next = { ...prev };
+      for (const file of dirty) next[file.path] = file.content;
+      for (const path of deleted) delete next[path];
+      return next;
+    });
+    setDeleted([]);
+    setNotice(`Pushed ${data.sha?.slice(0, 7)}`);
+    setStatus("Ready");
+  }
+
+  async function pullRepo() {
+    if (!repo) return;
+    setStatus("Pulling…");
+    try {
+      await openRepo(`${repo.owner}/${repo.repo}`, repo.branch);
+      setNotice("Pulled latest from GitHub.");
+    } finally {
+      setStatus("Ready");
+    }
+  }
+
+  async function createBranch(event: React.FormEvent) {
+    event.preventDefault();
+    if (!repo || !branchName.trim()) return;
+    const res = await fetch("/api/github/branches", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...repo, from: repo.branch, name: branchName.trim() }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      setError(data.error || "Could not create branch.");
+      return;
+    }
+    setBranchName("");
+    await openRepo(`${repo.owner}/${repo.repo}`, data.name);
+    setNotice(`Switched to ${data.name}`);
+  }
+
+  async function createPr() {
+    if (!repo) return;
+    const res = await fetch("/api/github/pr", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        owner: repo.owner,
+        repo: repo.repo,
+        head: repo.branch,
+        base: branches.includes("main") ? "main" : branches[0],
+        title: prTitle || `Changes on ${repo.branch}`,
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      setError(data.error || "Could not open PR.");
+      return;
+    }
+    setNotice(`Opened PR #${data.number}`);
+    window.open(data.url, "_blank");
   }
 
   async function savePat(event: React.FormEvent) {
@@ -341,324 +499,424 @@ export function Workspace() {
     });
     const data = await res.json();
     if (!res.ok) {
-      setError(data.error || "Could not save token.");
+      setError(data.error);
       return;
     }
     setPat("");
     await refreshGithub();
   }
 
-  const emptyChat = messages.length === 0;
-
   return (
-    <div className="flex h-full min-h-0 bg-background text-foreground">
-      <aside
-        className={`${sidebar ? "flex" : "hidden"} w-[280px] shrink-0 flex-col border-r border-line bg-panel md:flex`}
-      >
-        <div className="flex h-14 items-center gap-2.5 px-4">
-          <span className="grid h-7 w-7 place-items-center rounded-lg bg-accent text-[11px] font-bold text-[#0b0c10]">
-            HF
-          </span>
-          <span className="text-[15px] font-medium tracking-tight">Forge</span>
-        </div>
+    <div className="flex h-full min-h-0 flex-col bg-background text-foreground">
+      {busy ? <div className="agent-scan" /> : <div className="h-0.5 bg-line" />}
 
-        <div className="space-y-3 border-b border-line px-3 pb-3">
-          {ghUser ? (
-            <div className="flex items-center justify-between rounded-lg border border-line bg-panel-2 px-2.5 py-2">
-              <p className="truncate text-[12px]">@{ghUser.login}</p>
+      <header className="flex h-9 shrink-0 items-center gap-3 border-b border-line bg-sidebar px-3 text-[12px]">
+        <span className="font-semibold tracking-tight">Forge</span>
+        <span className="text-line">/</span>
+        <span className="truncate text-muted">
+          {repo ? `${repo.owner}/${repo.repo}` : "No repository"}
+        </span>
+        {activePath ? (
+          <>
+            <span className="text-line">—</span>
+            <span className="truncate font-mono text-[11px]">{activePath}</span>
+          </>
+        ) : null}
+        {busy ? (
+          <span className="ml-auto flex items-center gap-2 text-accent">
+            <span className="agent-pulse h-1.5 w-1.5 rounded-full bg-accent" />
+            {status}
+          </span>
+        ) : (
+          <span className="ml-auto text-muted">{status}</span>
+        )}
+      </header>
+
+      <div className="flex min-h-0 flex-1">
+        <aside className="flex w-[252px] shrink-0 flex-col border-r border-line bg-sidebar">
+          <div className="flex h-10 items-center justify-between px-3">
+            <span className="text-[11px] font-semibold tracking-[0.12em] text-muted uppercase">Explorer</span>
+            <button type="button" className="text-[11px] text-accent" onClick={() => uploadRef.current?.click()}>
+              Upload
+            </button>
+          </div>
+          <div className="space-y-2 border-b border-line px-2 pb-3">
+            {ghUser ? (
+              <div className="flex items-center justify-between px-1 text-[12px]">
+                <span>@{ghUser.login}</span>
+                <button
+                  type="button"
+                  className="text-muted"
+                  onClick={() => void fetch("/api/github/session", { method: "DELETE" }).then(refreshGithub)}
+                >
+                  Sign out
+                </button>
+              </div>
+            ) : (
+              <div className="space-y-1.5">
+                {oauth ? (
+                  <a href="/api/github/login" className="block rounded-md bg-accent py-1.5 text-center text-[12px] text-white">
+                    Connect GitHub
+                  </a>
+                ) : null}
+                <form onSubmit={savePat}>
+                  <input
+                    value={pat}
+                    onChange={(e) => setPat(e.target.value)}
+                    placeholder="GitHub token"
+                    type="password"
+                    className="mb-1 w-full rounded-md border border-line bg-white px-2 py-1.5 text-[12px] outline-none"
+                  />
+                  <button type="submit" className="w-full rounded-md border border-line bg-white py-1.5 text-[12px]">
+                    Connect GitHub
+                  </button>
+                </form>
+              </div>
+            )}
+            {ghRepos.length ? (
+              <select
+                value={repo ? `${repo.owner}/${repo.repo}` : ""}
+                onChange={(e) => e.target.value && void openRepo(e.target.value)}
+                className="w-full rounded-md border border-line bg-white px-2 py-1.5 text-[12px] outline-none"
+              >
+                <option value="">Select repository</option>
+                {ghRepos.map((item) => (
+                  <option key={item.fullName} value={item.fullName}>
+                    {item.fullName}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  if (repoInput.trim()) void openRepo(repoInput);
+                }}
+                className="flex gap-1"
+              >
+                <input
+                  value={repoInput}
+                  onChange={(e) => setRepoInput(e.target.value)}
+                  placeholder="owner/repo"
+                  className="min-w-0 flex-1 rounded-md border border-line bg-white px-2 py-1.5 text-[12px] outline-none"
+                />
+                <button className="rounded-md border border-line bg-white px-2 text-[12px]">Open</button>
+              </form>
+            )}
+            <input ref={uploadRef} type="file" multiple className="hidden" onChange={(e) => void onUpload(e.target.files)} />
+            <input ref={folderRef} type="file" multiple className="hidden" onChange={(e) => void onUpload(e.target.files)} />
+            <button type="button" className="w-full text-left text-[12px] text-muted" onClick={() => folderRef.current?.click()}>
+              Add folder
+            </button>
+            <form onSubmit={createLocalFile} className="flex gap-1">
+              <input
+                value={newPath}
+                onChange={(e) => setNewPath(e.target.value)}
+                placeholder="src/new-file.ts"
+                className="min-w-0 flex-1 rounded-md border border-line bg-white px-2 py-1.5 text-[12px] outline-none"
+              />
+              <button className="rounded-md border border-line bg-white px-2 text-[12px]">New</button>
+            </form>
+          </div>
+          <div className="min-h-0 flex-1 overflow-auto py-1">
+            {repoFiles.length === 0 && files.length === 0 ? (
+              <p className="px-3 py-4 text-[12px] leading-5 text-muted">Connect GitHub and select a repository to browse files.</p>
+            ) : (
+              <FileNodes
+                parent=""
+                dirs={dirs}
+                files={files}
+                repoFiles={repoFiles}
+                activePath={activePath}
+                collapsed={collapsed}
+                dirty={new Set([...dirty.map((f) => f.path), ...deleted])}
+                onOpen={(path) => {
+                  if (files.some((file) => file.path === path)) {
+                    setActivePath(path);
+                    setTabs((prev) => (prev.includes(path) ? prev : [...prev, path]));
+                    setShowDiff(false);
+                  } else if (repo) {
+                    void loadRepoFile(repo, path, true).catch((err) => {
+                      setError(err instanceof Error ? err.message : "Could not load file.");
+                      setStatus("Ready");
+                    });
+                  }
+                }}
+                onToggleDir={(path) =>
+                  setCollapsed((prev) => {
+                    const next = new Set(prev);
+                    if (next.has(path)) next.delete(path);
+                    else next.add(path);
+                    return next;
+                  })
+                }
+              />
+            )}
+          </div>
+        </aside>
+
+        <section className="flex min-w-0 flex-1 flex-col">
+          <div className="flex h-10 items-end gap-px overflow-x-auto border-b border-line bg-sidebar">
+            {tabs.map((path) => (
+              <button
+                key={path}
+                type="button"
+                onClick={() => {
+                  setActivePath(path);
+                  setShowDiff(false);
+                }}
+                className={`flex h-9 items-center gap-2 border-r border-line px-3 text-[12px] ${
+                  activePath === path && !showDiff ? "bg-background" : "text-muted"
+                }`}
+              >
+                {path.split("/").pop()}
+                <span
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    setTabs((prev) => prev.filter((item) => item !== path));
+                    if (activePath === path) setActivePath(tabs.find((item) => item !== path) ?? null);
+                  }}
+                >
+                  ×
+                </span>
+              </button>
+            ))}
+            {pending.length ? (
               <button
                 type="button"
-                className="text-[11px] text-muted"
-                onClick={() => void fetch("/api/github/session", { method: "DELETE" }).then(refreshGithub)}
+                onClick={() => setShowDiff(true)}
+                className={`h-9 px-3 text-[12px] ${showDiff ? "bg-accent-dim text-accent" : "text-muted"}`}
               >
-                Sign out
+                Diffs ({pending.length})
               </button>
-            </div>
-          ) : (
-            <div className="space-y-2">
-              {oauth ? (
-                <a
-                  href="/api/github/login"
-                  className="block rounded-lg bg-foreground py-2 text-center text-[13px] font-medium text-background"
-                >
-                  Connect GitHub
-                </a>
-              ) : null}
-              <form onSubmit={savePat} className="space-y-1.5">
-                <input
-                  value={pat}
-                  onChange={(event) => setPat(event.target.value)}
-                  placeholder="GitHub token (repo scope)"
-                  type="password"
-                  className="w-full rounded-lg border border-line bg-panel-2 px-2.5 py-2 text-[12px] outline-none"
-                />
-                <button type="submit" className="w-full rounded-lg border border-line py-1.5 text-[12px]">
-                  Connect with token
-                </button>
-              </form>
-            </div>
-          )}
+            ) : null}
+          </div>
 
-          {ghRepos.length ? (
+          <div className="min-h-0 flex-1">
+            {showDiff && review ? (
+              <div className="flex h-full flex-col">
+                <div className="flex items-center gap-2 border-b border-line px-3 py-2 text-[12px]">
+                  <span className="font-mono">{review.path}</span>
+                  <span className="text-muted">{review.action}</span>
+                  <span className="text-muted">
+                    {reviewIndex + 1}/{pending.length}
+                  </span>
+                  <button
+                    type="button"
+                    className="rounded-md border border-line px-2 py-1 disabled:opacity-40"
+                    disabled={reviewIndex <= 0}
+                    onClick={() => setReviewIndex((i) => Math.max(0, i - 1))}
+                  >
+                    Prev
+                  </button>
+                  <button
+                    type="button"
+                    className="rounded-md border border-line px-2 py-1 disabled:opacity-40"
+                    disabled={reviewIndex >= pending.length - 1}
+                    onClick={() => setReviewIndex((i) => Math.min(pending.length - 1, i + 1))}
+                  >
+                    Next
+                  </button>
+                  <button type="button" className="ml-auto rounded-md border border-line px-2 py-1" onClick={() => rejectReview(review)}>
+                    Reject
+                  </button>
+                  <button type="button" className="rounded-md bg-accent px-2 py-1 text-white" onClick={() => applyReview(review)}>
+                    Apply
+                  </button>
+                  <button
+                    type="button"
+                    className="rounded-md border border-line px-2 py-1"
+                    onClick={applyAllReviews}
+                  >
+                    Apply all
+                  </button>
+                </div>
+                <div className="min-h-0 flex-1">
+                  <CodeDiff path={review.path} original={review.original} modified={review.action === "delete" ? "" : review.content} />
+                </div>
+              </div>
+            ) : active ? (
+              <CodeEditor
+                path={active.path}
+                value={active.content}
+                onChange={(value) =>
+                  setFiles((prev) => prev.map((file) => (file.path === active.path ? { ...file, content: value } : file)))
+                }
+              />
+            ) : (
+              <div className="grid h-full place-items-center text-[13px] text-muted">
+                Open a file from the explorer
+              </div>
+            )}
+          </div>
+
+          {terminalOpen ? (
+            <div className="flex h-36 shrink-0 flex-col border-t border-line bg-[#fafafa]">
+              <div className="flex h-7 items-center justify-between border-b border-line px-3 text-[11px] text-muted">
+                <span>Terminal</span>
+                <button type="button" onClick={() => setTerminalOpen(false)}>
+                  Hide
+                </button>
+              </div>
+              <pre className="min-h-0 flex-1 overflow-auto px-3 py-2 font-mono text-[11px] leading-5 text-[#333]">
+                {term.length === 0
+                  ? "Agent run commands will appear here."
+                  : term.map((line) => `$ ${line.cmd}\n${line.output}\n`).join("\n")}
+              </pre>
+            </div>
+          ) : null}
+        </section>
+
+        <aside className="flex w-[360px] shrink-0 flex-col border-l border-line bg-panel">
+          <div className="flex h-10 items-center gap-2 border-b border-line px-3">
+            <div className="flex items-center gap-2 text-[12px] font-medium">
+              {busy ? <span className="agent-pulse h-2 w-2 rounded-full bg-accent" /> : <span className="h-2 w-2 rounded-full bg-[#c8c8c8]" />}
+              Agent
+            </div>
             <select
-              value={repo ? `${repo.owner}/${repo.repo}` : ""}
-              onChange={(event) => {
-                if (event.target.value) void openRepo(event.target.value);
-              }}
-              className="w-full rounded-lg border border-line bg-panel-2 px-2 py-2 text-[12px] outline-none"
+              value={model}
+              onChange={(e) => setModel(e.target.value as ModelId)}
+              className="ml-auto max-w-[160px] truncate rounded-md border border-line bg-white px-1.5 py-0.5 text-[11px] outline-none"
             >
-              <option value="">Open a repository</option>
-              {ghRepos.map((item) => (
-                <option key={item.fullName} value={item.fullName}>
-                  {item.fullName}
+              {MODELS.map((item) => (
+                <option key={item.id} value={item.id}>
+                  {item.label}
                 </option>
               ))}
             </select>
-          ) : (
-            <form
-              onSubmit={(event) => {
-                event.preventDefault();
-                if (repoInput.trim()) void openRepo(repoInput);
-              }}
-              className="flex gap-1"
-            >
-              <input
-                value={repoInput}
-                onChange={(event) => setRepoInput(event.target.value)}
-                placeholder="owner/repo"
-                className="min-w-0 flex-1 rounded-lg border border-line bg-panel-2 px-2 py-2 text-[12px] outline-none"
-              />
-              <button type="submit" className="rounded-lg border border-line px-2 text-[12px]">
-                Open
+            {busy ? (
+              <button type="button" className="text-[11px] text-muted" onClick={() => abortRef.current?.abort()}>
+                Stop
               </button>
-            </form>
-          )}
-
-          <div className="flex gap-1">
-            <button type="button" onClick={() => uploadRef.current?.click()} className="flex-1 rounded-lg border border-line py-1.5 text-[12px]">
-              Upload
-            </button>
-            <button type="button" onClick={() => folderRef.current?.click()} className="flex-1 rounded-lg border border-line py-1.5 text-[12px]">
-              Folder
-            </button>
-          </div>
-          <input ref={uploadRef} type="file" multiple className="hidden" onChange={(e) => void onUpload(e.target.files)} />
-          <input ref={folderRef} type="file" multiple className="hidden" onChange={(e) => void onUpload(e.target.files)} />
-        </div>
-
-        <div className="min-h-0 flex-1 overflow-auto py-2">
-          {repo ? (
-            <p className="px-3 pb-2 font-mono text-[11px] text-muted">
-              {repo.owner}/{repo.repo}@{repo.branch}
-            </p>
-          ) : null}
-          {repoFiles.length === 0 && files.length === 0 ? (
-            <p className="px-3 text-[12px] leading-5 text-muted">
-              Connect GitHub like Cursor. The agent reads the repo, edits files, then you commit back.
-            </p>
-          ) : (
-            <FileNodes
-              parent=""
-              dirs={dirs}
-              files={files}
-              repoFiles={repoFiles}
-              activePath={activePath}
-              collapsed={collapsed}
-              dirty={new Set(dirty.map((file) => file.path))}
-              loadingPath={loadingPath}
-              onOpen={(path) => {
-                if (files.some((file) => file.path === path)) setActivePath(path);
-                else if (repo) void loadRepoFile(repo, path, true);
-              }}
-              onToggleDir={(path) => {
-                setCollapsed((prev) => {
-                  const next = new Set(prev);
-                  if (next.has(path)) next.delete(path);
-                  else next.add(path);
-                  return next;
-                });
-              }}
-            />
-          )}
-        </div>
-      </aside>
-
-      <main className="relative flex min-w-0 flex-1 flex-col">
-        <header className="flex h-14 shrink-0 items-center gap-3 px-4">
-          <button type="button" className="text-muted md:hidden" onClick={() => setSidebar((v) => !v)}>
-            Menu
-          </button>
-          <select
-            value={model}
-            onChange={(event) => setModel(event.target.value as ModelId)}
-            className="rounded-full border border-line bg-transparent px-3 py-1 text-[13px] outline-none"
-          >
-            {MODELS.map((item) => (
-              <option key={item.id} value={item.id}>
-                {item.label}
-              </option>
-            ))}
-          </select>
-          <span className="ml-auto text-[12px] text-muted">
-            {repo ? `${repo.owner}/${repo.repo}` : "No repo"}
-            {dirty.length ? ` · ${dirty.length} changed` : ""}
-          </span>
-        </header>
-
-        {error ? <p className="px-4 pb-2 text-center text-[13px] text-[#f0b4b4]">{error}</p> : null}
-        {notice ? <p className="px-4 pb-2 text-center text-[13px] text-accent">{notice}</p> : null}
-
-        <div className="flex min-h-0 flex-1 flex-col overflow-auto">
-          {emptyChat ? (
-            <div className="flex flex-1 flex-col items-center justify-center px-4">
-              <h1 className="mb-8 text-center text-[28px] font-medium tracking-tight">
-                {repo ? `What should we change in ${repo.repo}?` : "What do you want to build?"}
-              </h1>
-              <Composer
-                draft={draft}
-                setDraft={setDraft}
-                busy={busy}
-                onSend={() => void send()}
-                composerRef={composerRef}
-                wide
-              />
-            </div>
-          ) : (
-            <div className="mx-auto w-full max-w-[48rem] flex-1 px-4 py-6">
-              {messages.map((message) => (
-                <article key={message.id} className="mb-8">
-                  <p className="mb-2 text-[12px] font-medium text-muted">
-                    {message.role === "user" ? "You" : "Forge"}
-                  </p>
-                  <pre className="whitespace-pre-wrap font-sans text-[16px] leading-7">
-                    {message.content.replace(/<file\s+path="[^"]+">[\s\S]*?<\/file>/g, (block) => {
-                      const path = block.match(/path="([^"]+)"/)?.[1] ?? "file";
-                      return `\nUpdated ${path}\n`;
-                    }) || (busy ? "" : "…")}
-                  </pre>
-                  {message.applied?.length ? (
-                    <p className="mt-3 text-[13px] text-accent">
-                      Applied {message.applied.join(", ")}. Review in the sidebar, then commit to GitHub.
-                    </p>
-                  ) : null}
-                </article>
-              ))}
-              {busy ? <p className="text-[13px] text-muted">Thinking</p> : null}
-              <div ref={chatEndRef} />
-            </div>
-          )}
-        </div>
-
-        {emptyChat ? null : (
-          <div className="mx-auto w-full max-w-[48rem] px-4 pb-5">
-            {dirty.length && repo ? (
-              <div className="mb-3 flex gap-2 rounded-2xl border border-line bg-panel px-3 py-2">
-                <input
-                  value={commitMessage}
-                  onChange={(event) => setCommitMessage(event.target.value)}
-                  placeholder={`Commit ${dirty.length} file${dirty.length === 1 ? "" : "s"} to GitHub`}
-                  className="min-w-0 flex-1 bg-transparent text-[13px] outline-none"
-                />
-                <button
-                  type="button"
-                  disabled={committing}
-                  onClick={() => void commitToGithub()}
-                  className="rounded-full bg-accent px-3 py-1.5 text-[12px] font-medium text-[#0b0c10] disabled:opacity-40"
-                >
-                  {committing ? "Pushing…" : "Commit & push"}
-                </button>
-              </div>
             ) : null}
-            <Composer
-              draft={draft}
-              setDraft={setDraft}
-              busy={busy}
-              onSend={() => void send()}
-              composerRef={composerRef}
-            />
           </div>
-        )}
-
-        {active ? (
-          <div className="absolute inset-0 z-10 flex flex-col bg-background/95">
-            <div className="flex h-14 items-center gap-3 border-b border-line px-4">
-              <p className="font-mono text-[13px]">{active.path}</p>
-              <button type="button" className="ml-auto text-[13px] text-muted" onClick={() => setActivePath(null)}>
-                Back to chat
-              </button>
+          {busy ? (
+            <div className="flex items-center gap-2 border-b border-line bg-accent-dim px-3 py-1.5 text-[11px] text-accent">
+              <span className="agent-pulse h-1.5 w-1.5 rounded-full bg-accent" />
+              Working — {status}
             </div>
-            <textarea
-              value={active.content}
-              onChange={(event) =>
-                setFiles((prev) =>
-                  prev.map((file) =>
-                    file.path === active.path ? { ...file, content: event.target.value } : file,
-                  ),
-                )
-              }
-              spellCheck={false}
-              className="editor-input min-h-0 flex-1 resize-none bg-transparent p-6 text-foreground outline-none"
-            />
+          ) : null}
+          <div className="min-h-0 flex-1 overflow-auto px-3 py-3">
+            {messages.length === 0 ? (
+              <p className="text-[13px] leading-6 text-muted">
+                Ask the agent to read, edit, create, or delete files. It will show a live diff before applying. Then commit, push, or open a PR.
+              </p>
+            ) : (
+              messages.map((message) => {
+                const visible = visibleAgentText(message.content, busy && message.role === "assistant");
+                return (
+                  <article key={message.id} className="mb-5">
+                    <p className="mb-1 text-[11px] font-medium text-muted">{message.role === "user" ? "You" : "Agent"}</p>
+                    <pre className="whitespace-pre-wrap font-sans text-[13px] leading-6">
+                      {visible || (busy && message.role === "assistant" ? "" : "…")}
+                    </pre>
+                  </article>
+                );
+              })
+            )}
+            {busy ? (
+              <p className="flex items-center gap-2 text-[12px] text-accent">
+                <span className="agent-pulse h-1.5 w-1.5 rounded-full bg-accent" />
+                Generating…
+              </p>
+            ) : null}
+            <div ref={chatEndRef} />
           </div>
-        ) : null}
-      </main>
-    </div>
-  );
-}
-
-function Composer({
-  draft,
-  setDraft,
-  busy,
-  onSend,
-  composerRef,
-  wide = false,
-}: {
-  draft: string;
-  setDraft: (value: string) => void;
-  busy: boolean;
-  onSend: () => void;
-  composerRef: RefObject<HTMLTextAreaElement | null>;
-  wide?: boolean;
-}) {
-  return (
-    <form
-      className={`w-full ${wide ? "max-w-[48rem]" : ""}`}
-      onSubmit={(event) => {
-        event.preventDefault();
-        onSend();
-      }}
-    >
-      <div className="rounded-[28px] border border-line bg-panel-2 px-4 pt-3 pb-2 shadow-[0_0_0_1px_rgba(255,255,255,0.03)]">
-        <textarea
-          ref={composerRef}
-          value={draft}
-          rows={wide ? 3 : 2}
-          onChange={(event) => setDraft(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === "Enter" && !event.shiftKey) {
-              event.preventDefault();
-              onSend();
-            }
-          }}
-          placeholder="Message Forge"
-          className="w-full resize-none bg-transparent text-[16px] leading-6 outline-none placeholder:text-muted"
-        />
-        <div className="flex items-center justify-between pb-1">
-          <p className="text-[11px] text-muted">Enter to send</p>
-          <button
-            type="submit"
-            disabled={busy || !draft.trim()}
-            className="grid h-8 w-8 place-items-center rounded-full bg-foreground text-background disabled:opacity-25"
-            aria-label="Send"
+          <form
+            className="border-t border-line p-3"
+            onSubmit={(e) => {
+              e.preventDefault();
+              void send();
+            }}
           >
-            <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
-              <path d="M7 11.5V2.5M7 2.5 3 6.5M7 2.5l4 4" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
-            </svg>
-          </button>
-        </div>
+            <textarea
+              value={draft}
+              rows={3}
+              onChange={(e) => setDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  void send();
+                }
+              }}
+              placeholder="Edit the repo, run tests, open a PR…"
+              className="w-full resize-none rounded-md border border-line bg-white px-3 py-2 text-[13px] outline-none"
+            />
+            <button
+              type="submit"
+              disabled={busy || !draft.trim()}
+              className="mt-2 w-full rounded-md bg-accent py-1.5 text-[12px] text-white disabled:opacity-40"
+            >
+              {busy ? "Working…" : "Send"}
+            </button>
+          </form>
+        </aside>
       </div>
-    </form>
+
+      {gitOpen ? (
+        <div className="border-t border-line bg-sidebar px-3 py-2">
+          <div className="mx-auto flex max-w-5xl flex-wrap items-end gap-2 text-[12px]">
+            {repo && branches.length ? (
+              <select
+                value={repo.branch}
+                onChange={(e) => void openRepo(`${repo.owner}/${repo.repo}`, e.target.value)}
+                className="rounded-md border border-line bg-white px-2 py-1 outline-none"
+              >
+                {branches.map((name) => (
+                  <option key={name} value={name}>
+                    {name}
+                  </option>
+                ))}
+              </select>
+            ) : null}
+            <form onSubmit={createBranch} className="flex gap-1">
+              <input
+                value={branchName}
+                onChange={(e) => setBranchName(e.target.value)}
+                placeholder="new-branch"
+                className="rounded-md border border-line bg-white px-2 py-1 outline-none"
+              />
+              <button className="rounded-md border border-line bg-white px-2 py-1">Branch</button>
+            </form>
+            <input
+              value={commitMessage}
+              onChange={(e) => setCommitMessage(e.target.value)}
+              placeholder="Commit message"
+              className="min-w-[180px] flex-1 rounded-md border border-line bg-white px-2 py-1 outline-none"
+            />
+            <button type="button" className="rounded-md border border-line bg-white px-2 py-1" onClick={() => void commitToGithub()}>
+              Commit & push
+            </button>
+            <button type="button" className="rounded-md border border-line bg-white px-2 py-1" onClick={() => void pullRepo()}>
+              Pull
+            </button>
+            <input
+              value={prTitle}
+              onChange={(e) => setPrTitle(e.target.value)}
+              placeholder="PR title"
+              className="rounded-md border border-line bg-white px-2 py-1 outline-none"
+            />
+            <button type="button" className="rounded-md bg-accent px-2 py-1 text-white" onClick={() => void createPr()}>
+              Create PR
+            </button>
+          </div>
+        </div>
+      ) : null}
+
+      <footer className="flex h-[22px] items-center gap-3 border-t border-line bg-status px-3 text-[11px] text-status-fg">
+        <button type="button" onClick={() => setGitOpen((v) => !v)}>
+          {repo ? `⎇ ${repo.branch}` : "No repo"}
+        </button>
+        <span className={`truncate ${busy ? "text-accent" : ""}`}>{busy ? status : error || notice || status}</span>
+        <span className="ml-auto">{MODELS.find((item) => item.id === model)?.label}</span>
+        <button type="button" onClick={() => setTerminalOpen((v) => !v)}>
+          Terminal
+        </button>
+        <span>
+          {dirty.length + deleted.length} change{dirty.length + deleted.length === 1 ? "" : "s"}
+        </span>
+      </footer>
+    </div>
   );
 }
 
@@ -670,7 +928,6 @@ function FileNodes({
   activePath,
   collapsed,
   dirty,
-  loadingPath,
   onOpen,
   onToggleDir,
 }: {
@@ -681,28 +938,26 @@ function FileNodes({
   activePath: string | null;
   collapsed: Set<string>;
   dirty: Set<string>;
-  loadingPath: string | null;
   onOpen: (path: string) => void;
   onToggleDir: (path: string) => void;
 }) {
   const names = dirs[parent] ?? [];
   return (
-    <ul className={parent ? "ml-2" : "px-1"}>
+    <ul className={parent ? "ml-3" : "px-1"}>
       {names.map((name) => {
         const path = joinPath(parent, name);
-        const isDir = Boolean(dirs[path]);
-        if (isDir) {
-          const isCollapsed = collapsed.has(path);
+        if (dirs[path]) {
           return (
             <li key={path}>
               <button
                 type="button"
                 onClick={() => onToggleDir(path)}
-                className="flex w-full items-center gap-1 rounded-md px-2 py-1 text-left text-[13px] text-muted hover:bg-white/4"
+                className="flex w-full rounded px-1.5 py-0.5 text-left text-[12px] text-[#444] hover:bg-white"
               >
+                {collapsed.has(path) ? "▸ " : "▾ "}
                 {name}
               </button>
-              {isCollapsed ? null : (
+              {collapsed.has(path) ? null : (
                 <FileNodes
                   parent={path}
                   dirs={dirs}
@@ -711,7 +966,6 @@ function FileNodes({
                   activePath={activePath}
                   collapsed={collapsed}
                   dirty={dirty}
-                  loadingPath={loadingPath}
                   onOpen={onOpen}
                   onToggleDir={onToggleDir}
                 />
@@ -719,19 +973,18 @@ function FileNodes({
             </li>
           );
         }
-        const listed = files.some((file) => file.path === path) || repoFiles.includes(path);
-        if (!listed) return null;
+        if (!files.some((file) => file.path === path) && !repoFiles.includes(path)) return null;
         return (
           <li key={path}>
             <button
               type="button"
               onClick={() => onOpen(path)}
-              className={`flex w-full items-center justify-between rounded-md px-2 py-1 text-left text-[13px] ${
-                activePath === path ? "bg-accent-dim text-accent" : "text-foreground/90 hover:bg-white/4"
+              className={`flex w-full items-center justify-between rounded px-1.5 py-0.5 text-left text-[12px] ${
+                activePath === path ? "bg-accent-dim text-accent" : "hover:bg-white"
               }`}
             >
-              <span className="truncate">{loadingPath === path ? "Loading…" : name}</span>
-              {dirty.has(path) ? <span className="text-accent">•</span> : null}
+              <span className="truncate">{name}</span>
+              {dirty.has(path) ? <span className="text-accent">M</span> : null}
             </button>
           </li>
         );

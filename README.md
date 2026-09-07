@@ -37,7 +37,9 @@ Import this GitHub repo in Vercel, set `HF_TOKEN`, deploy. Git commits must use 
 
 ## What it does
 
-- Stream chat (ChatGPT-style, centered) with DeepSeek V4 Pro
-- Connect GitHub (OAuth or a repo-scoped token), pick a repo, and let the agent read it
-- Apply edits in the workspace, then **commit & push** back to GitHub
-- Upload files or a folder when you are not using git
+- Cursor-style 3-panel workspace: file explorer, Monaco editor, AI agent
+- Connect GitHub (OAuth or a repo-scoped token), pick a repo, browse the tree
+- Agent can propose file create/edit/delete with a live diff before apply
+- Git: branch, commit & push, pull, create pull requests
+- Terminal panel for agent run commands (hosted Vercel cannot execute your repo tests/builds; git goes through the GitHub API)
+- Streaming replies and a Working status while the agent runs

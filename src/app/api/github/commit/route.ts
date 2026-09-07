@@ -6,7 +6,7 @@ type Body = {
   repo?: string;
   branch?: string;
   message?: string;
-  files?: Array<{ path: string; content: string }>;
+  files?: Array<{ path: string; content?: string; delete?: boolean }>;
 };
 
 export async function POST(req: Request) {
@@ -62,12 +62,16 @@ export async function POST(req: Request) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         base_tree: parent.data.tree.sha,
-        tree: files.map((file) => ({
-          path: file.path,
-          mode: "100644",
-          type: "blob",
-          content: file.content,
-        })),
+        tree: files.map((file) =>
+          file.delete
+            ? { path: file.path, mode: "100644", type: "blob", sha: null }
+            : {
+                path: file.path,
+                mode: "100644",
+                type: "blob",
+                content: file.content ?? "",
+              },
+        ),
       }),
     },
   );

@@ -1,25 +1,29 @@
 @import "tailwindcss";
 
 :root {
-  --background: #08090b;
-  --foreground: #e8eaef;
-  --panel: #0c0d10;
-  --panel-2: #101114;
-  --line: rgba(255, 255, 255, 0.06);
-  --muted: #8b909b;
-  --accent: #8ba4ff;
-  --accent-dim: rgba(139, 164, 255, 0.12);
+  --background: #ffffff;
+  --foreground: #1f1f1f;
+  --sidebar: #f3f3f3;
+  --panel: #f8f8f8;
+  --line: #e4e4e4;
+  --muted: #6d6d6d;
+  --accent: #0b69d4;
+  --accent-dim: #e7f1fb;
+  --status: #f3f3f3;
+  --status-fg: #3c3c3c;
 }
 
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
+  --color-sidebar: var(--sidebar);
   --color-panel: var(--panel);
-  --color-panel-2: var(--panel-2);
   --color-line: var(--line);
   --color-muted: var(--muted);
   --color-accent: var(--accent);
   --color-accent-dim: var(--accent-dim);
+  --color-status: var(--status);
+  --color-status-fg: var(--status-fg);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
 }
@@ -40,8 +44,7 @@ body {
 }
 
 ::selection {
-  background: var(--accent-dim);
-  color: var(--foreground);
+  background: #cce4ff;
 }
 
 ::-webkit-scrollbar {
@@ -50,14 +53,26 @@ body {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #23242a;
-  border-radius: 99px;
+  background: #d0d0d0;
+  border-radius: 8px;
 }
 
-.editor-gutter,
-.editor-input {
-  font-family: var(--font-geist-mono), ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 12.5px;
-  line-height: 1.7;
-  tab-size: 2;
+@keyframes agent-pulse {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+.agent-pulse {
+  animation: agent-pulse 1.1s ease-in-out infinite;
+}
+
+.agent-scan {
+  height: 2px;
+  background: var(--accent);
+  animation: agent-pulse 1.1s ease-in-out infinite;
 }

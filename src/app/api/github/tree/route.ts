@@ -5,9 +5,11 @@ import { githubJson, tokenFromRequest } from "@/lib/github";
 export async function POST(req: Request) {
   const token = tokenFromRequest(req);
   let input = "";
+  let requestedBranch = "";
   try {
     const body = await req.json();
     input = String(body.repo ?? "");
+    requestedBranch = String(body.branch ?? "");
   } catch {
     return NextResponse.json({ error: "Invalid JSON body." }, { status: 400 });
   }
@@ -34,7 +36,7 @@ export async function POST(req: Request) {
     return NextResponse.json({ error }, { status: repoRes.status });
   }
 
-  const branch = repoRes.data.default_branch || "main";
+  const branch = requestedBranch || repoRes.data.default_branch || "main";
   const treeRes = await githubJson<{
     tree?: Array<{ path?: string; type?: string; size?: number }>;
   }>(

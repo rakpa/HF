@@ -87,21 +87,43 @@ export function buildFileContext(files: WorkspaceFile[]): string {
   return chunks.join("\n\n");
 }
 
-export type ProposedFile = { path: string; content: string };
+export type ProposedFile = { path: string; content: string; action: "create" | "edit" | "delete" };
+
+export type AgentRun = { cmd: string };
 
 export function parseProposedFiles(text: string): ProposedFile[] {
   const found: ProposedFile[] = [];
-  const tagged = /<file\s+path="([^"]+)">([\s\S]*?)<\/file>/g;
+  const tagged = /<file\s+path="([^"]+)"(?:\s+action="(create|edit|delete)")?\s*>([\s\S]*?)<\/file>/g;
   for (const match of text.matchAll(tagged)) {
-    found.push({ path: match[1], content: match[2].replace(/^\n|\n$/g, "") });
+    const action = (match[2] as ProposedFile["action"] | undefined) ?? "edit";
+    found.push({
+      path: match[1],
+      content: match[3].replace(/^\n|\n$/g, ""),
+      action,
+    });
   }
-  const fenced =
-    /```(?:[\w.+-]+)?(?::| )\s*([^\s\n]+)\n([\s\S]*?)```/g;
+  const fenced = /```(?:[\w.+-]+)?(?::| )\s*([^\s\n]+)\n([\s\S]*?)```/g;
   for (const match of text.matchAll(fenced)) {
     const path = match[1].trim();
     if (!path.includes("/") && !path.includes(".")) continue;
     if (found.some((item) => item.path === path)) continue;
-    found.push({ path, content: match[2].replace(/\n$/, "") });
+    found.push({ path, content: match[2].replace(/\n$/, ""), action: "edit" });
   }
   return found;
+}
+
+export function parseAgentRuns(text: string): AgentRun[] {
+  const runs: AgentRun[] = [];
+  for (const match of text.matchAll(/<run\s+cmd="([^"]+)"\s*\/>/g)) {
+    runs.push({ cmd: match[1] });
+  }
+  for (const match of text.matchAll(/<run(?:\s+cmd="([^"]+)")?\s*>([\s\S]*?)<\/run>/g)) {
+    const cmd = (match[1] || match[2]).trim();
+    if (cmd) runs.push({ cmd });
+  }
+  for (const match of text.matchAll(/<command>([\s\S]*?)<\/command>/g)) {
+    const cmd = match[1].trim();
+    if (cmd) runs.push({ cmd });
+  }
+  return runs;
 }

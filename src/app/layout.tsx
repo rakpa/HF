@@ -13,9 +13,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "HF — Coding agent",
-  description:
-    "Upload files or connect a GitHub repo, then edit with DeepSeek V4 Pro through Hugging Face.",
+  title: "Forge — AI editor",
+  description: "Cursor-style coding agent with GitHub, diffs, and git.",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
