@@ -20,7 +20,7 @@ Free Hugging Face accounts get about **$0.10/month** of routed inference credits
 
 ## Deploy on Vercel
 
-Import this GitHub repo in Vercel, set `HF_TOKEN`, deploy.
+Import this GitHub repo in Vercel, set `HF_TOKEN`, deploy. Git commits must use a real address on your GitHub account (not a `.local` machine email), or Vercel will block the deployment.
 
 ## What it does
 
