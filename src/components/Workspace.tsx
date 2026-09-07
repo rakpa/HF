@@ -569,7 +569,7 @@ export function Workspace() {
       ) : null}
 
       <aside
-        className={`fixed inset-y-0 left-0 z-40 flex w-[min(100vw,20rem)] max-w-full shrink-0 flex-col border-r border-line bg-sidebar transition-transform duration-200 ease-out md:static md:z-auto md:w-[272px] md:translate-x-0 ${
+        className={`fixed inset-y-0 left-0 z-40 flex w-[min(100vw,22rem)] max-w-full shrink-0 flex-col border-r border-line bg-sidebar transition-transform duration-200 ease-out md:static md:z-auto md:w-[272px] md:translate-x-0 ${
           sidebarOpen ? "translate-x-0 shadow-[8px_0_30px_rgba(0,0,0,0.12)]" : "-translate-x-full md:translate-x-0"
         }`}
       >
