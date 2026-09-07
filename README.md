@@ -14,7 +14,20 @@ The model does not run on Vercel. Vercel hosts the UI; Hugging Face routes your 
 HF_TOKEN=hf_...
 ```
 
-Optional: `GITHUB_TOKEN` for private repos and a higher GitHub rate limit.
+Optional: add a GitHub token so the agent can open private repos and **commit & push** like Cursor:
+
+```
+GITHUB_TOKEN=ghp_...
+```
+
+Use a classic token with the `repo` scope, or GitHub OAuth:
+
+```
+GITHUB_CLIENT_ID=...
+GITHUB_CLIENT_SECRET=...
+```
+
+OAuth callback URL: `https://YOUR_VERCEL_DOMAIN/api/github/callback`
 
 Free Hugging Face accounts get about **$0.10/month** of routed inference credits (PRO: **$2**). If chat returns 402, switch the model to DeepSeek V4 Flash or Qwen3-Coder-Next.
 
@@ -24,8 +37,7 @@ Import this GitHub repo in Vercel, set `HF_TOKEN`, deploy. Git commits must use 
 
 ## What it does
 
-- Stream chat with DeepSeek V4 Pro (or Flash / Qwen3-Coder-Next)
-- Upload files or a folder
-- Connect `owner/repo` or a GitHub URL
-- Include open/checked files as model context
-- Apply proposed files into the workspace
+- Stream chat (ChatGPT-style, centered) with DeepSeek V4 Pro
+- Connect GitHub (OAuth or a repo-scoped token), pick a repo, and let the agent read it
+- Apply edits in the workspace, then **commit & push** back to GitHub
+- Upload files or a folder when you are not using git

@@ -1,7 +1,9 @@
 import { NextResponse } from "next/server";
 import { isSkippedPath, MAX_FILES, parseGithubRepo } from "@/lib/files";
+import { githubJson, tokenFromRequest } from "@/lib/github";
 
 export async function POST(req: Request) {
+  const token = tokenFromRequest(req);
   let input = "";
   try {
     const body = await req.json();
@@ -18,36 +20,26 @@ export async function POST(req: Request) {
     );
   }
 
-  const headers: Record<string, string> = {
-    Accept: "application/vnd.github+json",
-    "User-Agent": "codeforge",
-    "X-GitHub-Api-Version": "2022-11-28",
-  };
-  if (process.env.GITHUB_TOKEN) {
-    headers.Authorization = `Bearer ${process.env.GITHUB_TOKEN}`;
-  }
-
-  const repoRes = await fetch(
+  const repoRes = await githubJson<{ default_branch?: string }>(
     `https://api.github.com/repos/${parsed.owner}/${parsed.repo}`,
-    { headers, cache: "no-store" },
+    token,
   );
   if (!repoRes.ok) {
-    const status = repoRes.status;
     const error =
-      status === 404
-        ? "Repository not found. For private repos, set GITHUB_TOKEN."
-        : status === 403
-          ? "GitHub rate limit hit. Add GITHUB_TOKEN to raise it."
-          : `GitHub returned ${status}.`;
-    return NextResponse.json({ error }, { status });
+      repoRes.status === 404
+        ? "Repository not found. Connect GitHub to open private repos."
+        : repoRes.status === 403
+          ? "GitHub rate limit or permission error. Connect GitHub with repo scope."
+          : `GitHub returned ${repoRes.status}.`;
+    return NextResponse.json({ error }, { status: repoRes.status });
   }
 
-  const repo = (await repoRes.json()) as { default_branch?: string };
-  const branch = repo.default_branch || "main";
-
-  const treeRes = await fetch(
+  const branch = repoRes.data.default_branch || "main";
+  const treeRes = await githubJson<{
+    tree?: Array<{ path?: string; type?: string; size?: number }>;
+  }>(
     `https://api.github.com/repos/${parsed.owner}/${parsed.repo}/git/trees/${encodeURIComponent(branch)}?recursive=1`,
-    { headers, cache: "no-store" },
+    token,
   );
   if (!treeRes.ok) {
     return NextResponse.json(
@@ -56,10 +48,7 @@ export async function POST(req: Request) {
     );
   }
 
-  const payload = (await treeRes.json()) as {
-    tree?: Array<{ path?: string; type?: string; size?: number }>;
-  };
-  const files = (payload.tree ?? [])
+  const files = (treeRes.data.tree ?? [])
     .filter((item) => item.type === "blob" && item.path && !isSkippedPath(item.path))
     .filter((item) => (item.size ?? 0) <= 200_000)
     .slice(0, MAX_FILES)
