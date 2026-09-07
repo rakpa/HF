@@ -562,7 +562,7 @@ export function Workspace() {
       {sidebarOpen ? (
         <button
           type="button"
-          aria-label="Close workspace"
+          aria-label="Dismiss workspace overlay"
           className="fixed inset-0 z-30 bg-black/35 md:hidden"
           onClick={closeSidebar}
         />
