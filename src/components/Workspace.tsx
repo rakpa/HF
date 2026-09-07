@@ -835,11 +835,11 @@ export function Workspace() {
 
         <div className="flex min-h-0 flex-1 flex-col overflow-auto">
           {emptyChat ? (
-            <div className="flex flex-1 flex-col items-center justify-center px-4 py-6">
+            <div className="flex flex-1 flex-col items-center justify-start px-4 pt-10 pb-6 sm:justify-center sm:pt-4">
               <h1 className="mb-3 max-w-xl text-center text-[22px] font-medium tracking-tight sm:text-[28px]">
                 {repo ? `What should we change in ${repo.repo}?` : "What do you want to build?"}
               </h1>
-              <p className="mb-8 max-w-md text-center text-[14px] text-muted">
+              <p className="mb-6 max-w-md text-center text-[14px] text-muted sm:mb-8">
                 {files.length
                   ? `${files.length} file${files.length === 1 ? "" : "s"} are attached. Ask to read or edit any of them.`
                   : "Use the workspace panel to upload files or connect GitHub, then chat here."}
@@ -979,11 +979,11 @@ function Composer({
         onSend();
       }}
     >
-      <div className="rounded-[28px] border border-line bg-white px-4 pt-3 pb-2 shadow-[0_8px_30px_rgba(0,0,0,0.04)]">
+      <div className="rounded-[24px] border border-line bg-white px-3 pt-3 pb-2 shadow-[0_8px_30px_rgba(0,0,0,0.04)] sm:rounded-[28px] sm:px-4">
         <textarea
           ref={composerRef}
           value={draft}
-          rows={wide ? 3 : 2}
+          rows={wide ? 2 : 2}
           onChange={(event) => setDraft(event.target.value)}
           onKeyDown={(event) => {
             if (event.key === "Enter" && !event.shiftKey) {
@@ -992,7 +992,7 @@ function Composer({
             }
           }}
           placeholder="Message Forge"
-          className="w-full resize-none bg-transparent text-[16px] leading-6 outline-none placeholder:text-muted"
+          className="w-full resize-none bg-transparent text-[16px] leading-6 outline-none placeholder:text-muted sm:rows-3"
         />
         <div className="flex items-center justify-between pb-1">
           <p className="text-[11px] text-muted">{busy ? "Working…" : "Enter to send"}</p>
